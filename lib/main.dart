@@ -1,26 +1,11 @@
-// Copyright 2018 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-import 'dart:io' show Platform;
+import 'dart:async';
+import 'dart:io' show File, Platform;
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
-import 'package:color_panel/color_panel.dart';
 import 'package:example_flutter/keyboard_test_page.dart';
 import 'package:file_chooser/file_chooser.dart';
-import 'package:menubar/menubar.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
@@ -43,7 +28,7 @@ void main() {
       final frame = Rect.fromLTWH(left, top, width, height);
       window_size.setWindowFrame(frame);
       window_size
-          .setWindowTitle('Flutter Testbed on ${Platform.operatingSystem}');
+          .setWindowTitle('Flutter Data Correlation Tool for ${Platform.operatingSystem}');
 
       if (Platform.isMacOS) {
         window_size.setWindowMinSize(Size(800, 600));
@@ -73,6 +58,9 @@ class _AppState extends State<MyApp> {
         }
       });
     }
+    data = Map();
+    cov = Map();
+    cor = Map();
   }
 
   Color _primaryColor = Colors.blue;
@@ -110,80 +98,128 @@ class _AppState extends State<MyApp> {
     });
   }
 
-  /// Rebuilds the native menu bar based on the current state.
-  void updateMenubar() {
-    // Currently, the menubar plugin is only implemented on macOS and linux.
-    if (!Platform.isMacOS && !Platform.isLinux) {
-      return;
+  Future<void> openCsvDialog() async{
+    String initialDirectory;
+    if (Platform.isMacOS || Platform.isWindows) {
+      initialDirectory =
+          (await getApplicationDocumentsDirectory()).path;
     }
-    setApplicationMenu([
-      Submenu(label: 'Color', children: [
-        MenuItem(
-            label: 'Reset',
-            enabled: _primaryColor != Colors.blue,
-            shortcut: LogicalKeySet(
-                LogicalKeyboardKey.meta, LogicalKeyboardKey.backspace),
-            onClicked: () {
-              setPrimaryColor(Colors.blue);
-            }),
-        MenuDivider(),
-        Submenu(label: 'Presets', children: [
-          MenuItem(
-              label: 'Red',
-              enabled: _primaryColor != Colors.red,
-              shortcut: LogicalKeySet(LogicalKeyboardKey.meta,
-                  LogicalKeyboardKey.shift, LogicalKeyboardKey.keyR),
-              onClicked: () {
-                setPrimaryColor(Colors.red);
-              }),
-          MenuItem(
-              label: 'Green',
-              enabled: _primaryColor != Colors.green,
-              shortcut: LogicalKeySet(LogicalKeyboardKey.meta,
-                  LogicalKeyboardKey.alt, LogicalKeyboardKey.keyG),
-              onClicked: () {
-                setPrimaryColor(Colors.green);
-              }),
-          MenuItem(
-              label: 'Purple',
-              enabled: _primaryColor != Colors.deepPurple,
-              shortcut: LogicalKeySet(LogicalKeyboardKey.meta,
-                  LogicalKeyboardKey.control, LogicalKeyboardKey.keyP),
-              onClicked: () {
-                setPrimaryColor(Colors.deepPurple);
-              }),
-        ])
-      ]),
-      Submenu(label: 'Counter', children: [
-        MenuItem(
-            label: 'Reset',
-            enabled: _counter != 0,
-            shortcut: LogicalKeySet(
-                LogicalKeyboardKey.meta, LogicalKeyboardKey.digit0),
-            onClicked: () {
-              _setCounter(0);
-            }),
-        MenuDivider(),
-        MenuItem(
-            label: 'Increment',
-            shortcut: LogicalKeySet(LogicalKeyboardKey.f2),
-            onClicked: incrementCounter),
-        MenuItem(
-            label: 'Decrement',
-            enabled: _counter > 0,
-            shortcut: LogicalKeySet(LogicalKeyboardKey.f1),
-            onClicked: _decrementCounter),
-      ]),
-    ]);
+    final result = await showOpenPanel(
+        initialDirectory: initialDirectory,
+        allowedFileTypes: <FileTypeFilterGroup>[
+          FileTypeFilterGroup(label: 'CSV', fileExtensions: <String>['csv'])
+        ]
+    );
+    try {
+      final text = _resultTextForFileChooserOperation(_FileChooserType.open, result);
+      print(text);
+    } catch (ex){}
+    if(result.paths.isNotEmpty)
+      await processCsvfile(result.paths[0]);
+  }
+
+  Map<String,List<num>> data;
+  Map<String, Map<String,num>> cov;
+  Map<String, Map<String,num>> cor;
+
+  Future<void> processCsvfile(String path) async{
+    var fileDataContent = await (new File(path)).readAsString();
+    var lines = fileDataContent.split('\n');
+    data.clear();
+    for(var line in lines){
+      var cols = line.split(',');
+      data[cols[0]] = []; // name of the line
+      for(var i=1; i<cols.length; i++)
+        data[cols[0]].add(num.parse(cols[i])); // put elements
+    }
+
+    processData();
+  }
+
+  Future<void> processData() async {
+    print("calculating logs");
+    await processLog2Data();
+    // todo: zscore
+    // todo: norm distrib replacement
+    print("calculating covs");
+    await processCovData();
+    print("calculating cors");
+    await processCorData();
+    print("done");
+  }
+
+  Future<void> processLog2Data() async {
+    for(var key in data.keys) {
+      for(var i=0; i<data[key].length; i++) {
+        data[key][i] = math.log(data[key][i])/math.log2e;
+      }
+    }
+  }
+
+  double mean(List<num>arr) {
+    num sum = 0.0;
+    for(num e in arr)
+      sum += e;
+    return sum/arr.length;
+  }
+
+  double stdev(List<num>arr){
+    var sum=0.0;
+    var m = mean(arr);
+    for(num x in arr) {
+      sum += (x-m)*(x-m);
+    }
+    return math.sqrt(sum/(arr.length -1));
+  }
+
+  Future<void> processCovData() async {
+    cov.clear();
+    for(int j=0; j<data.keys.length; j++) {
+      var keyj = data.keys.elementAt(j); // todo: elementAt is not efficient
+      cov[keyj] = Map();
+
+      var arrayj = data[keyj];
+      var meanj = mean(arrayj);
+
+      for(int i=0;i<data.keys.length;i++) { // todo: make it start from 0
+        var keyi = data.keys.elementAt(i); // todo: elementAt is not efficient
+        var arrayi = data[keyi];
+        var meani = mean(arrayi);
+
+        var sum=0.0;
+        for(int x=0;x<arrayi.length;x++)
+          sum+=(arrayi[x]-meani)*(arrayj[x]-meanj);
+
+        cov[keyj][keyi]=sum/(arrayi.length-1); // cov number
+//        cov[keyj][keyi]=cov[keyi][keyj];
+      }
+    }
+  }
+
+  Future<void> processCorData() async {
+    cor.clear();
+    for(int j=0; j<data.keys.length; j++) {
+      var keyj = data.keys.elementAt(j); // todo: elementAt is not efficient
+      cor[keyj] = Map();
+
+      var arrayj = data[keyj];
+      var stdevj = stdev(arrayj);
+
+      for(int i=0;i<data.keys.length;i++) { // todo: make it start from j
+        var keyi = data.keys.elementAt(i); // todo: elementAt is not efficient
+        var arrayi = data[keyi];
+        var stdevi = stdev(arrayi);
+
+        cor[keyj][keyi]=cov[keyj][keyi]/(stdevi*stdevj); // cov number
+//        cor[keyj][keyi]=cor[keyi][keyj];
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // Any time the state changes, the menu needs to be rebuilt.
-    updateMenubar();
-
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Data Correlation Tool',
       theme: ThemeData(
         primarySwatch: Colors.blue,
         primaryColor: _primaryColor,
@@ -193,96 +229,45 @@ class _AppState extends State<MyApp> {
         fontFamily: 'Roboto',
       ),
       darkTheme: ThemeData.dark(),
-      home: _MyHomePage(title: 'Flutter Demo Home Page', counter: _counter),
-    );
-  }
-}
-
-class _MyHomePage extends StatelessWidget {
-  const _MyHomePage({this.title, this.counter = 0});
-
-  final String title;
-  final int counter;
-
-  void _changePrimaryThemeColor(BuildContext context) {
-    final colorPanel = ColorPanel.instance;
-    if (!colorPanel.showing) {
-      colorPanel.show((color) {
-        _AppState.of(context).setPrimaryColor(color);
-        // Setting the primary color to a non-opaque color raises an exception.
-      }, showAlpha: false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(title),
-        actions: <Widget>[
-          new IconButton(
-            icon: new Icon(Icons.color_lens),
-            tooltip: 'Change theme color',
-            onPressed: () {
-              _changePrimaryThemeColor(context);
-            },
-          ),
-        ],
-      ),
-      body: LayoutBuilder(
-        builder: (context, viewportConstraints) {
-          return SingleChildScrollView(
-            child: ConstrainedBox(
-              constraints:
-                  BoxConstraints(minHeight: viewportConstraints.maxHeight),
-              child: Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: <Widget>[
-                    const Text(
-                      'You have pushed the button this many times:',
-                    ),
-                    new Text(
-                      '$counter',
-                      style: Theme.of(context).textTheme.headline4,
-                    ),
-                    TextInputTestWidget(),
-                    FileChooserTestWidget(),
-                    URLLauncherTestWidget(),
-                    new RaisedButton(
-                      child: new Text('Test raw keyboard events'),
-                      onPressed: () {
-                        Navigator.of(context).push(new MaterialPageRoute(
-                            builder: (context) => KeyboardTestPage()));
-                      },
-                    ),
-                    Container(
-                      width: 380.0,
-                      height: 100.0,
-                      decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey, width: 1.0)),
-                      child: Scrollbar(
-                        child: ListView.builder(
-                          padding: EdgeInsets.all(8.0),
-                          itemExtent: 20.0,
-                          itemCount: 50,
-                          itemBuilder: (context, index) {
-                            return Text('entry $index');
-                          },
-                        ),
-                      ),
-                    ),
-                  ],
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(
+        appBar: AppBar(
+          title: Text("Data Correlation Tool"),
+          actions: <Widget>[],
+        ),
+        drawer: Drawer(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              DrawerHeader(
+                child: Text('Data Correlation Tool'),
+                decoration: BoxDecoration(
+                  color: Colors.blue,
                 ),
               ),
-            ),
-          );
-        },
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _AppState.of(context).incrementCounter,
-        tooltip: 'Increment',
-        child: Icon(Icons.add),
+              ListTile(
+                title: Text('Open'),
+                onTap: openCsvDialog,
+              ),
+            ],
+          ),
+        ),
+        body: LayoutBuilder(
+          builder: (context, viewportConstraints) {
+            return SingleChildScrollView(
+              child: ConstrainedBox(
+                constraints:
+                BoxConstraints(minHeight: viewportConstraints.maxHeight),
+                child: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: <Widget>[],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -326,7 +311,7 @@ class FileChooserTestWidget extends StatelessWidget {
           child: const Text('OPEN MEDIA'),
           onPressed: () async {
             final result =
-                await showOpenPanel(allowedFileTypes: <FileTypeFilterGroup>[
+            await showOpenPanel(allowedFileTypes: <FileTypeFilterGroup>[
               FileTypeFilterGroup(label: 'Images', fileExtensions: <String>[
                 'bmp',
                 'gif',
